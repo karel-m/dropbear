@@ -515,14 +515,20 @@ AC_ARG_ENABLE(bundled-libtom,
 			BUNDLED_LIBTOM=0
 			AC_CHECK_LIB(tommath, mp_exptmod, LIBTOM_LIBS="-ltommath $LIBTOM_LIBS",
 				[AC_MSG_ERROR([Missing system libtommath and --disable-bundled-libtom was specified])] )
+			AC_CHECK_LIB(tommath, mp_sqrtmod_prime, LIBTOM_LIBS="-ltommath $LIBTOM_LIBS",
+				[AC_MSG_ERROR([System libtommath is too old (1.0+ required)])] )
 			AC_CHECK_LIB(tomcrypt, register_cipher, LIBTOM_LIBS="-ltomcrypt $LIBTOM_LIBS",
 				[AC_MSG_ERROR([Missing system libtomcrypt and --disable-bundled-libtom was specified])] )
+			AC_CHECK_LIB(tomcrypt, ecc_get_curve, LIBTOM_LIBS="-ltomcrypt $LIBTOM_LIBS",
+				[AC_MSG_ERROR([System libtomcrypt is too old (1.19+ required)])] )
 		fi
 	],
 	[
 		BUNDLED_LIBTOM=0
 		AC_CHECK_LIB(tommath, mp_exptmod, LIBTOM_LIBS="-ltommath $LIBTOM_LIBS", BUNDLED_LIBTOM=1)
+		AC_CHECK_LIB(tommath, mp_sqrtmod_prime, LIBTOM_LIBS="-ltommath $LIBTOM_LIBS", BUNDLED_LIBTOM=1)
 		AC_CHECK_LIB(tomcrypt, register_cipher, LIBTOM_LIBS="-ltomcrypt $LIBTOM_LIBS", BUNDLED_LIBTOM=1)
+		AC_CHECK_LIB(tomcrypt, ecc_get_curve, LIBTOM_LIBS="-ltomcrypt $LIBTOM_LIBS", BUNDLED_LIBTOM=1)
 	]
 )
 

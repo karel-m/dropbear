@@ -650,8 +650,12 @@ void kexdh_comb_key(struct kex_dh_param *param, mp_int *dh_pub_them,
 #if DROPBEAR_ECDH
 struct kex_ecdh_param *gen_kexecdh_param() {
 	struct kex_ecdh_param *param = m_malloc(sizeof(*param));
+	const ltc_ecc_curve* cu = NULL;
+	if (ecc_get_curve(ses.newkeys->algo_kex->ecc_curve->name, &cu) != CRYPT_OK) {
+		dropbear_exit("ECC error");
+	}
 	if (ecc_make_key_ex(NULL, dropbear_ltc_prng, 
-		&param->key, ses.newkeys->algo_kex->ecc_curve->dp) != CRYPT_OK) {
+		&param->key, cu) != CRYPT_OK) {
 		dropbear_exit("ECC error");
 	}
 	return param;

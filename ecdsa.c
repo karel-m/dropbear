@@ -4,6 +4,7 @@
 #include "ecc.h"
 #include "ecdsa.h"
 #include "signkey.h"
+#include "bignum.h"
 
 #if DROPBEAR_ECDSA
 
@@ -15,18 +16,19 @@ int signkey_is_ecdsa(enum signkey_type type)
 }
 
 enum signkey_type ecdsa_signkey_type(const ecc_key * key) {
+	struct dropbear_ecc_curve* curve = curve_for_key(key);
 #if DROPBEAR_ECC_256
-	if (key->dp == ecc_curve_nistp256.dp) {
+	if (curve == &ecc_curve_nistp256) {
 		return DROPBEAR_SIGNKEY_ECDSA_NISTP256;
 	}
 #endif
 #if DROPBEAR_ECC_384
-	if (key->dp == ecc_curve_nistp384.dp) {
+	if (curve == &ecc_curve_nistp384) {
 		return DROPBEAR_SIGNKEY_ECDSA_NISTP384;
 	}
 #endif
 #if DROPBEAR_ECC_521
-	if (key->dp == ecc_curve_nistp521.dp) {
+	if (curve == &ecc_curve_nistp521) {
 		return DROPBEAR_SIGNKEY_ECDSA_NISTP521;
 	}
 #endif
@@ -34,22 +36,22 @@ enum signkey_type ecdsa_signkey_type(const ecc_key * key) {
 }
 
 ecc_key *gen_ecdsa_priv_key(unsigned int bit_size) {
-	const ltc_ecc_set_type *dp = NULL; /* curve domain parameters */
+	const ltc_ecc_curve *dp = NULL;
 	ecc_key *new_key = NULL;
 	switch (bit_size) {
 #if DROPBEAR_ECC_256
 		case 256:
-			dp = ecc_curve_nistp256.dp;
+			ecc_get_curve("nistp256", &dp);
 			break;
 #endif
 #if DROPBEAR_ECC_384
 		case 384:
-			dp = ecc_curve_nistp384.dp;
+			ecc_get_curve("nistp384", &dp);
 			break;
 #endif
 #if DROPBEAR_ECC_521
 		case 521:
-			dp = ecc_curve_nistp521.dp;
+			ecc_get_curve("nistp521", &dp);
 			break;
 #endif
 	}
@@ -94,7 +96,6 @@ ecc_key *buf_get_ecdsa_pub_key(buffer* buf) {
 		TRACE(("mismatching identifiers"))
 		goto out;
 	}
-
 	for (curve = dropbear_ecc_curves; *curve; curve++) {
 		if (memcmp(identifier, (char*)(*curve)->name, strlen((char*)(*curve)->name)) == 0) {
 			break;
@@ -116,7 +117,7 @@ out:
 		buf_free(q_buf);
 		q_buf = NULL;
 	}
-	TRACE(("leave buf_get_ecdsa_pub_key"))	
+	TRACE(("leave buf_get_ecdsa_pub_key"))
 	return new_key;
 }
 
@@ -138,10 +139,10 @@ ecc_key *buf_get_ecdsa_priv_key(buffer *buf) {
 }
 
 void buf_put_ecdsa_pub_key(buffer *buf, ecc_key *key) {
-	struct dropbear_ecc_curve *curve = NULL;
+	struct dropbear_ecc_curve *curve = curve_for_key(key);
 	char key_ident[30];
 
-	curve = curve_for_dp(key->dp);
+	if (curve == NULL) dropbear_exit("ECC error");
 	snprintf(key_ident, sizeof(key_ident), "ecdsa-sha2-%s", curve->name);
 	buf_putstring(buf, key_ident, strlen(key_ident));
 	buf_putstring(buf, curve->name, strlen(curve->name));
@@ -154,72 +155,30 @@ void buf_put_ecdsa_priv_key(buffer *buf, ecc_key *key) {
 }
 
 void buf_put_ecdsa_sign(buffer *buf, const ecc_key *key, const buffer *data_buf) {
-	/* Based on libtomcrypt's ecc_sign_hash but without the asn1 */
-	int err = DROPBEAR_FAILURE;
-	struct dropbear_ecc_curve *curve = NULL;
+	int err = DROPBEAR_FAILURE, rv;
 	hash_state hs;
 	unsigned char hash[64];
-	void *e = NULL, *p = NULL, *s = NULL, *r;
+	mp_int *r = NULL, *s = NULL;
+	struct dropbear_ecc_curve *curve = curve_for_key(key);
+	unsigned char rawsig[200];
+	unsigned long rawsig_len = sizeof(rawsig);
 	char key_ident[30];
 	buffer *sigbuf = NULL;
 
-	TRACE(("buf_put_ecdsa_sign"))
-	curve = curve_for_dp(key->dp);
-
-	if (ltc_init_multi(&r, &s, &p, &e, NULL) != CRYPT_OK) { 
-		goto out;
-	}
-
+	if (curve == NULL) goto out;
 	curve->hash_desc->init(&hs);
 	curve->hash_desc->process(&hs, data_buf->data, data_buf->len);
 	curve->hash_desc->done(&hs, hash);
 
-	if (ltc_mp.unsigned_read(e, hash, curve->hash_desc->hashsize) != CRYPT_OK) {
-		goto out;
-	}
+	rv = ecc_sign_hash_rfc7518(hash, curve->hash_desc->hashsize,
+					rawsig, &rawsig_len,
+					NULL, dropbear_ltc_prng, key);
+	if (rv != CRYPT_OK) goto out;
 
-	if (ltc_mp.read_radix(p, (char *)key->dp->order, 16) != CRYPT_OK) { 
-		goto out; 
-	}
+	m_mp_alloc_init_multi(&r, &s, NULL);
 
-	for (;;) {
-		ecc_key R_key; /* ephemeral key */
-		if (ecc_make_key_ex(NULL, dropbear_ltc_prng, &R_key, key->dp) != CRYPT_OK) {
-			goto out;
-		}
-		if (ltc_mp.mpdiv(R_key.pubkey.x, p, NULL, r) != CRYPT_OK) {
-			goto out;
-		}
-		if (ltc_mp.compare_d(r, 0) == LTC_MP_EQ) {
-			/* try again */
-			ecc_free(&R_key);
-			continue;
-		}
-		/* k = 1/k */
-		if (ltc_mp.invmod(R_key.k, p, R_key.k) != CRYPT_OK) {
-			goto out;
-		}
-		/* s = xr */
-		if (ltc_mp.mulmod(key->k, r, p, s) != CRYPT_OK) {
-			goto out;
-		}
-		/* s = e +  xr */
-		if (ltc_mp.add(e, s, s) != CRYPT_OK) {
-			goto out;
-		}
-		if (ltc_mp.mpdiv(s, p, NULL, s) != CRYPT_OK) {
-			goto out;
-		}
-		/* s = (e + xr)/k */
-		if (ltc_mp.mulmod(s, R_key.k, p, s) != CRYPT_OK) {
-			goto out;
-		}
-		ecc_free(&R_key);
-
-		if (ltc_mp.compare_d(s, 0) != LTC_MP_EQ) {
-			break;
-		}
-	}
+	if (mp_read_unsigned_bin(r, rawsig, rawsig_len / 2) != CRYPT_OK) goto out;
+	if (mp_read_unsigned_bin(s, rawsig + rawsig_len / 2, rawsig_len / 2) != CRYPT_OK) goto out;
 
 	snprintf(key_ident, sizeof(key_ident), "ecdsa-sha2-%s", curve->name);
 	buf_putstring(buf, key_ident, strlen(key_ident));
@@ -232,10 +191,7 @@ void buf_put_ecdsa_sign(buffer *buf, const ecc_key *key, const buffer *data_buf)
 	err = DROPBEAR_SUCCESS;
 
 out:
-	if (r && s && p && e) {
-		ltc_deinit_multi(r, s, p, e, NULL);
-	}
-
+	m_mp_free_multi(&r, &s, NULL);
 	if (sigbuf) {
 		buf_free(sigbuf);
 	}
@@ -270,148 +226,38 @@ out:
 	return ret;
 }
 
-
 int buf_ecdsa_verify(buffer *buf, const ecc_key *key, const buffer *data_buf) {
-	/* Based on libtomcrypt's ecc_verify_hash but without the asn1 */
-	int ret = DROPBEAR_FAILURE;
 	hash_state hs;
-	struct dropbear_ecc_curve *curve = NULL;
-	unsigned char hash[64];
-	ecc_point *mG = NULL, *mQ = NULL;
-	void *r = NULL, *s = NULL, *v = NULL, *w = NULL, *u1 = NULL, *u2 = NULL, 
-		*e = NULL, *p = NULL, *m = NULL;
-	void *mp = NULL;
+	unsigned char hash[64], rawsig[200] = { 0 };
+	unsigned long sig_half, i;
+	int ret = DROPBEAR_FAILURE, err, stat = 0;
+	struct dropbear_ecc_curve *curve = curve_for_key(key);
+	mp_int *r = NULL, *s = NULL;
 
-	/* verify 
-	 *
-	 * w  = s^-1 mod n
-	 * u1 = xw 
-	 * u2 = rw
-	 * X = u1*G + u2*Q
-	 * v = X_x1 mod n
-	 * accept if v == r
-	 */
-
-	TRACE(("buf_ecdsa_verify"))
-	curve = curve_for_dp(key->dp);
-
-	mG = ltc_ecc_new_point();
-	mQ = ltc_ecc_new_point();
-	if (ltc_init_multi(&r, &s, &v, &w, &u1, &u2, &p, &e, &m, NULL) != CRYPT_OK
-		|| !mG
-		|| !mQ) {
-		dropbear_exit("ECC error");
-	}
-
+	m_mp_alloc_init_multi(&r, &s, NULL);
 	if (buf_get_ecdsa_verify_params(buf, r, s) != DROPBEAR_SUCCESS) {
 		goto out;
 	}
 
+	if (curve == NULL) goto out;
 	curve->hash_desc->init(&hs);
 	curve->hash_desc->process(&hs, data_buf->data, data_buf->len);
 	curve->hash_desc->done(&hs, hash);
 
-	if (ltc_mp.unsigned_read(e, hash, curve->hash_desc->hashsize) != CRYPT_OK) {
-		goto out;
-	}
+	sig_half = ecc_get_size(key);
+	i = mp_unsigned_bin_size(r);
+	if (i > sig_half) goto out;
+	if ((err = mp_to_unsigned_bin(r, rawsig + (sig_half - i))) != CRYPT_OK) goto out;
+	i = mp_unsigned_bin_size(s);
+	if (i > sig_half) goto out;
+	if ((err = mp_to_unsigned_bin(s, rawsig + (2 * sig_half - i))) != CRYPT_OK) goto out;
 
-   /* get the order */
-	if (ltc_mp.read_radix(p, (char *)key->dp->order, 16) != CRYPT_OK) { 
-		goto out; 
-	}
-
-   /* get the modulus */
-	if (ltc_mp.read_radix(m, (char *)key->dp->prime, 16) != CRYPT_OK) { 
-		goto out; 
-	}
-
-   /* check for zero */
-	if (ltc_mp.compare_d(r, 0) == LTC_MP_EQ 
-		|| ltc_mp.compare_d(s, 0) == LTC_MP_EQ 
-		|| ltc_mp.compare(r, p) != LTC_MP_LT 
-		|| ltc_mp.compare(s, p) != LTC_MP_LT) {
-		goto out;
-	}
-
-   /*  w  = s^-1 mod n */
-	if (ltc_mp.invmod(s, p, w) != CRYPT_OK) { 
-		goto out; 
-	}
-
-   /* u1 = ew */
-	if (ltc_mp.mulmod(e, w, p, u1) != CRYPT_OK) { 
-		goto out; 
-	}
-
-   /* u2 = rw */
-	if (ltc_mp.mulmod(r, w, p, u2) != CRYPT_OK) { 
-		goto out; 
-	}
-
-   /* find mG and mQ */
-	if (ltc_mp.read_radix(mG->x, (char *)key->dp->Gx, 16) != CRYPT_OK) { 
-		goto out; 
-	}
-	if (ltc_mp.read_radix(mG->y, (char *)key->dp->Gy, 16) != CRYPT_OK) { 
-		goto out; 
-	}
-	if (ltc_mp.set_int(mG->z, 1) != CRYPT_OK) { 
-		goto out; 
-	}
-
-	if (ltc_mp.copy(key->pubkey.x, mQ->x) != CRYPT_OK
-		|| ltc_mp.copy(key->pubkey.y, mQ->y) != CRYPT_OK
-		|| ltc_mp.copy(key->pubkey.z, mQ->z) != CRYPT_OK) { 
-		goto out; 
-	}
-
-   /* compute u1*mG + u2*mQ = mG */
-	if (ltc_mp.ecc_mul2add == NULL) {
-		if (ltc_mp.ecc_ptmul(u1, mG, mG, m, 0) != CRYPT_OK) { 
-			goto out; 
-		}
-		if (ltc_mp.ecc_ptmul(u2, mQ, mQ, m, 0) != CRYPT_OK) {
-			goto out; 
-		}
-
-		/* find the montgomery mp */
-		if (ltc_mp.montgomery_setup(m, &mp) != CRYPT_OK) { 
-			goto out; 
-		}
-
-		/* add them */
-		if (ltc_mp.ecc_ptadd(mQ, mG, mG, m, mp) != CRYPT_OK) { 
-			goto out; 
-		}
-
-		/* reduce */
-		if (ltc_mp.ecc_map(mG, m, mp) != CRYPT_OK) { 
-			goto out; 
-		}
-	} else {
-		/* use Shamir's trick to compute u1*mG + u2*mQ using half of the doubles */
-		if (ltc_mp.ecc_mul2add(mG, u1, mQ, u2, mG, m) != CRYPT_OK) { 
-			goto out; 
-		}
-	}
-
-   /* v = X_x1 mod n */
-	if (ltc_mp.mpdiv(mG->x, p, NULL, v) != CRYPT_OK) { 
-		goto out; 
-	}
-
-   /* does v == r */
-	if (ltc_mp.compare(v, r) == LTC_MP_EQ) {
-		ret = DROPBEAR_SUCCESS;
-	}
-
+	err = ecc_verify_hash_rfc7518(rawsig, sig_half * 2,
+					hash, curve->hash_desc->hashsize,
+					&stat, key);
+	if (err == CRYPT_OK && stat == 1) ret = DROPBEAR_SUCCESS;
 out:
-	ltc_ecc_del_point(mG);
-	ltc_ecc_del_point(mQ);
-	ltc_deinit_multi(r, s, v, w, u1, u2, p, e, m, NULL);
-	if (mp != NULL) { 
-		ltc_mp.montgomery_deinit(mp);
-	}
+	m_mp_free_multi(&r, &s, NULL);
 	return ret;
 }
 

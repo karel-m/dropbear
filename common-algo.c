@@ -255,8 +255,6 @@ static const struct dropbear_kex kex_dh_group14_sha256 = {DROPBEAR_KEX_NORMAL_DH
 static const struct dropbear_kex kex_dh_group16_sha512 = {DROPBEAR_KEX_NORMAL_DH, dh_p_16, DH_P_16_LEN, NULL, &sha512_desc };
 #endif
 
-/* These can't be const since dropbear_ecc_fill_dp() fills out
- ecc_curve at runtime */
 #if DROPBEAR_ECDH
 #if DROPBEAR_ECC_256
 static const struct dropbear_kex kex_ecdh_nistp256 = {DROPBEAR_KEX_ECDH, NULL, 0, &ecc_curve_nistp256, &sha256_desc };

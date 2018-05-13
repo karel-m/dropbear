@@ -69,7 +69,6 @@ void crypto_init() {
 
 #if DROPBEAR_ECC
 	ltc_mp = ltm_desc;
-	dropbear_ecc_fill_dp();
 #endif
 }
 

@@ -780,9 +780,7 @@ static sign_key *openssh_read(const char *filename, const char * UNUSED(passphra
 			errmsg = "Error parsing ECC key";
 			goto error;
 		}
-		m_mp_alloc_init_multi((mp_int**)&ecc->k, NULL);
-		if (mp_read_unsigned_bin(ecc->k, private_key_bytes, private_key_len)
-			!= MP_OKAY) {
+		if (ecc_set_key(private_key_bytes, private_key_len, PK_PRIVATE, ecc) != CRYPT_OK) {
 			errmsg = "Error parsing ECC key";
 			goto error;
 		}
@@ -1050,7 +1048,7 @@ static int openssh_write(const char *filename, sign_key *key,
 		*/
 		buffer *seq_buf = buf_new(400);
 		ecc_key **eck = (ecc_key**)signkey_key_ptr(key, key->type);
-		const long curve_size = (*eck)->dp->size;
+		const long curve_size = ecc_get_size(*eck);
 		int curve_oid_len = 0;
 		const void* curve_oid = NULL;
 		unsigned long pubkey_size = 2*curve_size+1;
